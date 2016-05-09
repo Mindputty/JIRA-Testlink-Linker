@@ -1,18 +1,70 @@
 <?php
 
-/// following imports are already defined in bugAdd.php
 ini_set('display_errors', 'On');
 require_once '../../third_party/xml-rpc/class-IXR.php';
 require_once '../api/xmlrpc/v1/api.const.inc.php';
 
 $db_servername = "localhost";
-$username = "testlinkDB_username";
-$password = "DB_password";
+$username = "user";
+$password = "pass";
 $db_name = "testlink";
-$jira_username = "JIRA_username";
-$jira_pw = "JIRA_password";
+$jira_username = "jira_username";
+$jira_pw = "jira_pw";
 $status = '';
 $status_icon = '';
+
+/*
+	Function: update_status_on_jira
+	Req Params: $args['tcversion_id'];
+				$args['build_id'];
+				$args['status'];
+				$args['bug'];
+				$args['tproject_id'];
+	Return: none
+*/
+function update_status_on_jira($args){
+
+	global $db_servername, $username, $password, $db_name;
+
+	$tcversion_id = $args['tcversion_id'];
+	$build_id = $args['build_id'];
+	$status = $args['status'];
+	$tproject_id = $args['tproject_id'];
+	$bugs = array();
+
+	// query the DB for feature_id
+	$conn = new mysqli($db_servername, $username, $password, $db_name);
+	if ($conn->connect_error) {
+	    die("Connection failed: " . $conn->connect_error);
+	}
+	$sql = "SELECT id FROM testplan_tcversions WHERE tcversion_id = $tcversion_id;";
+	$res = $conn->query($sql);
+	$fetched = $res->fetch_object();
+	$feature_id = $fetched->id;
+	$sql = "SELECT prefix FROM testprojects WHERE id = $tproject_id;";
+	$res = $conn->query($sql);
+	$fetched = $res->fetch_object();
+	$prefix = $fetched->prefix;
+	$sql = "SELECT tc_external_id FROM tcversions WHERE id = $tcversion_id;";
+	$res = $conn->query($sql);
+	$fetched = $res->fetch_object();
+	$external_id = $fetched->tc_external_id;
+	$tc_id = $prefix . "-" . $external_id;
+    $sql = "SELECT distinct(bug_id) FROM execution_bugs WHERE execution_id in (SELECT id FROM executions where tcversion_id = $tcversion_id);";
+	$res = $conn->query($sql);
+    while ($fetched = $res->fetch_object()){
+    	array_push($bugs, $fetched->bug_id);
+    }
+	$conn->close();
+
+	$exec_link = "http://testlink.cenx.localnet/testlink/ltx.php?item=exec&feature_id=$feature_id&build_id=$build_id";
+	choose_status_icon($status);
+	foreach ($bugs as $bug){
+		post_execution_url_to_jira($bug, $exec_link, $tc_id, '', false, $status);	
+	}
+	
+
+}
 
 function post_to_jira($args){
 
@@ -41,9 +93,8 @@ function post_to_jira($args){
 	$conn->close();
 
 	$exec_url = generate_execution_url($exec_id);
-	echo "status is: " . $status;
-	choose_status_url($status);
-	post_execution_url_to_jira($issue, $exec_url, $tc_id, $tc_text);
+	choose_status_icon($status);
+	post_execution_url_to_jira($issue, $exec_url, $tc_id, $tc_text, true, $status);
 
 }
 
@@ -52,13 +103,13 @@ function delete_from_jira($exec_id, $bug_id){
 	$exec_url = generate_execution_url($exec_id);
 	$exec_url_encoded = "globalId=" . urlencode("system=".$exec_url);
 	delete_link_from_jira($bug_id, $exec_url_encoded);
-	
+
 }
 
 function delete_link_from_jira($issue, $exec_url){
 	global $jira_username, $jira_pw;
 
-	$jira_base_url = "https://cenx-cf.atlassian.net";
+	$jira_base_url = "https://ourcompany.atlassian.net";
 	$remotelink_stem = sprintf("/rest/api/2/issue/%s/remotelink?%s",$issue, $exec_url);
 	$remotelink_url = $jira_base_url . $remotelink_stem;
 	$auth_stem = "/rest/auth/1/session";
@@ -97,7 +148,7 @@ function delete_link_from_jira($issue, $exec_url){
 	}
 }
 
-function choose_status_url($status){
+function choose_status_icon($status){
 	global $status_icon;
 	switch($status){
 		case "p":
@@ -111,15 +162,28 @@ function choose_status_url($status){
 	}
 }
 
-function post_execution_url_to_jira($issue, $exec_url, $tc_id, $tc_text){
+function post_execution_url_to_jira($issue, $exec_url, $tc_id, $tc_text, $summary_text, $status){
 
 	global $jira_username, $jira_pw, $status_icon;
 
-	$jira_base_url = "https://companyname.atlassian.net";
+	$passed = false;
+	$jira_base_url = "https://ourcompany.atlassian.net";
 	$remotelink_stem = sprintf("/rest/api/2/issue/%s/remotelink",$issue);
 	$remotelink_url = $jira_base_url . $remotelink_stem;
 	$auth_stem = "/rest/auth/1/session";
 	$auth_api = $jira_base_url . $auth_stem;
+
+	if($status == 'p'){
+		$passed = 'true';
+	} else {
+		$passed = 'false';
+	}
+
+	$tc_text_str = "";
+	if($summary_text == true){
+		$tc_text_str = "\"summary\": \"$tc_text\",";		
+	}
+
 
 	try {
 
@@ -144,14 +208,12 @@ function post_execution_url_to_jira($issue, $exec_url, $tc_id, $tc_text){
 												\"relationship\" : \"links to\",
 												\"object\": {\"url\": \"$exec_url\",
 											        		 \"title\": \"$tc_id\",
-		 											         \"summary\": \"$tc_text\",
-		 											         \"icon\" : {\"url16x16\" : \"http://marketing.dell.com/Templates/ion/Dell_US_Brand_Site/themes/Dell/tc-icon.jpg\",
+		 											         $tc_text_str \"icon\" : {\"url16x16\" : \"http://marketing.dell.com/Templates/ion/Dell_US_Brand_Site/themes/Dell/tc-icon.jpg\",
 		 											     				 \"title\" : \"Testlink Test Case Execution\"},
-											        		 \"status\": {\"resolved\": false,
+											        		 \"status\": {\"resolved\": $passed,
 											        		  			  \"icon\": {\"url16x16\": \"$status_icon\",
-											        		  			  			 \"title\": \"Status\",
+											        		  			  			 \"title\": \"Status: $status\",
 											        		  			  			 \"link\" : \"$exec_url\"}}}}");
-
 		$output = curl_exec($jira);
 		if(curl_getinfo($jira, CURLINFO_HTTP_CODE) != 200 && curl_getinfo($jira, CURLINFO_HTTP_CODE) != 201){
 			throw new Exception(sprintf('Response code from JIRA while adding link was %s',curl_getinfo($jira, CURLINFO_HTTP_CODE)));	
@@ -160,7 +222,8 @@ function post_execution_url_to_jira($issue, $exec_url, $tc_id, $tc_text){
 		return true;
 	} catch (Exception $e){
 		echo sprintf("Caught Exception: %s \n", $e->getMessage());
-		echo "This likely means that JIRA failed to link back to Testlink\n";
+		echo "This means that a JIRA-linking-to-Testlink operation failed\n";
+		echo "TRACE:/issue:" . $issue ."/status_icon:". $status_icon ."/status:". $status ."/passed?:". $passed ."/tc_id:". $tc_id;
 		curl_close($jira);
 		return false;
 	}
